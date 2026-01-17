@@ -1,0 +1,7 @@
+__pycache__
+*.pyc
+training_runs
+predictions
+examples
+Datasets
+figures
