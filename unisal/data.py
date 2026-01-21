@@ -33,6 +33,10 @@ if "MIT300_DATA_DIR" not in os.environ:
     os.environ["MIT300_DATA_DIR"] = str(default_data_dir / "MIT300")
 if "MIT1003_DATA_DIR" not in os.environ:
     os.environ["MIT1003_DATA_DIR"] = str(default_data_dir / "MIT1003")
+if "MIT950_DATA_DIR" not in os.environ:
+    os.environ["MIT950_DATA_DIR"] = str(default_data_dir / "MIT950")
+if "FINAL_TEST_MIT53_DATA_DIR" not in os.environ:
+    os.environ["FINAL_TEST_MIT53_DATA_DIR"] = str(default_data_dir / "FINAL_TEST_MIT53")
 config_path = Path(__file__).resolve().parent / "cache"
 
 
@@ -41,7 +45,7 @@ def get_dataset():
 
 
 def get_dataloader(src='DHF1K'):
-    if src in ('MIT1003',):
+    if src in ('MIT1003', 'MIT950', 'FINAL_TEST_MIT53'):
         return ImgSizeDataLoader
     return DataLoader
 
@@ -386,8 +390,16 @@ class MIT1003Dataset(Dataset, utils.KwConfigClass):
 
     def get_map(self, img_idx):
         map_file = self.fix_dir / self.all_image_files[img_idx]['map']
+        if not map_file.exists():
+            raise FileNotFoundError(
+                f"Could not find saliency map file for image {img_idx} (img: {self.all_image_files[img_idx]['img']}). "
+                f"Expected: {map_file}"
+            )
         map = cv2.imread(str(map_file), cv2.IMREAD_GRAYSCALE)
-        assert(map is not None)
+        if map is None:
+            raise ValueError(
+                f"Could not read saliency map file (may be corrupted): {map_file}"
+            )
         return map
 
     def get_img(self, img_idx):
@@ -398,8 +410,19 @@ class MIT1003Dataset(Dataset, utils.KwConfigClass):
 
     def get_fixation_map(self, img_idx):
         fix_map_file = self.fix_dir / self.all_image_files[img_idx]['pts']
+        if not fix_map_file.exists():
+            # Try using the map file as fallback
+            fix_map_file = self.fix_dir / self.all_image_files[img_idx]['map']
+        if not fix_map_file.exists():
+            raise FileNotFoundError(
+                f"Could not find fixation map file for image {img_idx} (img: {self.all_image_files[img_idx]['img']}). "
+                f"Tried: {self.fix_dir / self.all_image_files[img_idx]['pts']} and {self.fix_dir / self.all_image_files[img_idx]['map']}"
+            )
         fix_map = cv2.imread(str(fix_map_file), cv2.IMREAD_GRAYSCALE)
-        assert(fix_map is not None)
+        if fix_map is None:
+            raise ValueError(
+                f"Could not read fixation map file (may be corrupted): {fix_map_file}"
+            )
         return fix_map
 
     @property
@@ -542,6 +565,223 @@ class MIT1003Dataset(Dataset, utils.KwConfigClass):
     def __getitem__(self, item):
         img_idx = self.samples[item]
         return self.get_data(img_idx)
+
+
+class MIT950Dataset(MIT1003Dataset):
+    """MIT950 dataset - subset of MIT1003 with 950 images"""
+    
+    source = 'MIT950'
+    n_train_val_images = 950
+    dynamic = False
+    
+    @property
+    def dir(self):
+        return Path(os.environ["MIT950_DATA_DIR"])
+    
+    @property
+    def fix_dir(self):
+        return self.dir / 'ALLFIXATIONMAPS'
+    
+    @property
+    def img_dir(self):
+        return self.dir / 'ALLSTIMULI'
+
+
+class FINAL_TEST_MIT53Dataset(MIT1003Dataset):
+    """FINAL_TEST_MIT53 dataset - 53 test images with ground truth for evaluation"""
+    
+    source = 'FINAL_TEST_MIT53'
+    n_train_val_images = 53
+    dynamic = False
+    
+    def __init__(self, phase='eval', subset=None, verbose=1,
+                 preproc_cfg=None, n_x_val=10, x_val_step=0, x_val_seed=27):
+        # Override to always use eval phase and include all samples
+        self.phase = 'eval'  # Force eval phase
+        self.train = False
+        self.subset = subset
+        self.verbose = verbose
+        self.preproc_cfg = {
+            'rgb_mean': (0.485, 0.456, 0.406),
+            'rgb_std': (0.229, 0.224, 0.225),
+        }
+        if preproc_cfg is not None:
+            self.preproc_cfg.update(preproc_cfg)
+        
+        # For eval/test, use all images
+        self.samples = list(range(self.n_train_val_images))
+        
+        self.all_image_files, self.size_dict = self.load_data()
+        
+        # Adjust samples to match actual number of available images
+        actual_n_images = len(self.all_image_files)
+        if actual_n_images < self.n_train_val_images:
+            print(f"Warning: Expected {self.n_train_val_images} images but found {actual_n_images}")
+            self.samples = [s for s in self.samples if s < actual_n_images]
+        
+        if self.subset is not None:
+            self.samples = self.samples[:int(len(self.samples) * subset)]
+        
+        # For compatibility with video datasets
+        self.n_images_dict = {sample: 1 for sample in self.samples}
+        self.target_size_dict = {
+            img_idx: self.size_dict[img_idx]['target_size']
+            for img_idx in self.samples}
+        self.n_samples = len(self.samples)
+        self.frame_modulo = 1
+    
+    @property
+    def dir(self):
+        return Path(os.environ["FINAL_TEST_MIT53_DATA_DIR"])
+    
+    @property
+    def fix_dir(self):
+        # Try both possible directory structures
+        if (self.dir / 'maps').exists():
+            return self.dir / 'maps'
+        elif (self.dir / 'ALLFIXATIONMAPS').exists():
+            return self.dir / 'ALLFIXATIONMAPS'
+        else:
+            return self.dir / 'maps'  # Default
+    
+    @property
+    def img_dir(self):
+        # Try both possible directory structures
+        if (self.dir / 'images').exists():
+            return self.dir / 'images'
+        elif (self.dir / 'ALLSTIMULI').exists():
+            return self.dir / 'ALLSTIMULI'
+        else:
+            return self.dir / 'images'  # Default
+    
+    def load_data(self):
+        """Load data for FINAL_TEST_MIT53 - supports both .jpeg and other formats"""
+        all_image_files = []
+        
+        if not self.img_dir.exists():
+            raise FileNotFoundError(f"Image directory does not exist: {self.img_dir}")
+        if not self.fix_dir.exists():
+            raise FileNotFoundError(f"Fixation map directory does not exist: {self.fix_dir}")
+        
+        if self.verbose > 0:
+            print(f"Loading FINAL_TEST_MIT53 data from:")
+            print(f"  Images: {self.img_dir}")
+            print(f"  Maps: {self.fix_dir}")
+        
+        # Try .jpeg first (MIT1003 style)
+        img_files = sorted(self.img_dir.glob("*.jpeg"))
+        if not img_files:
+            # Try .jpg
+            img_files = sorted(self.img_dir.glob("*.jpg"))
+        if not img_files:
+            # Try .png
+            img_files = sorted(self.img_dir.glob("*.png"))
+        
+        if not img_files:
+            raise FileNotFoundError(f"No image files found in {self.img_dir}")
+        
+        if self.verbose > 0:
+            print(f"Found {len(img_files)} image files")
+        
+        for img_file in img_files:
+            # Try different naming conventions for maps
+            map_candidates = [
+                img_file.stem + "_fixMap.jpg",
+                img_file.stem + "_fixMap.png",
+                img_file.stem + "_fixMap.jpeg",
+                img_file.name.replace('.jpg', '_fixMap.jpg').replace('.jpeg', '_fixMap.jpg').replace('.png', '_fixMap.png'),
+            ]
+            pts_candidates = [
+                img_file.stem + "_fixPts.jpg",
+                img_file.stem + "_fixPts.png",
+                img_file.stem + "_fixPts.jpeg",
+                img_file.name.replace('.jpg', '_fixPts.jpg').replace('.jpeg', '_fixPts.jpg').replace('.png', '_fixPts.png'),
+                # Also try without extension variations
+                img_file.stem + "_fixPts",
+            ]
+            
+            map_file = None
+            pts_file = None
+            
+            for map_cand in map_candidates:
+                if (self.fix_dir / map_cand).exists():
+                    map_file = map_cand
+                    break
+            
+            for pts_cand in pts_candidates:
+                # Try with common extensions if no extension provided
+                if '.' not in pts_cand:
+                    for ext in ['.jpg', '.png', '.jpeg']:
+                        if (self.fix_dir / (pts_cand + ext)).exists():
+                            pts_file = pts_cand + ext
+                            break
+                elif (self.fix_dir / pts_cand).exists():
+                    pts_file = pts_cand
+                    break
+                if pts_file:
+                    break
+            
+            # If no specific naming found, try exact name match
+            if map_file is None:
+                if (self.fix_dir / img_file.name).exists():
+                    map_file = img_file.name
+                # Try with common extensions
+                for ext in ['.jpg', '.png', '.jpeg']:
+                    if (self.fix_dir / (img_file.stem + ext)).exists():
+                        map_file = img_file.stem + ext
+                        break
+            
+            # Only add if we found at least the map file (pts is optional for some datasets)
+            if map_file and (self.fix_dir / map_file).exists():
+                # Verify pts file exists, if not use map as fallback
+                if pts_file and (self.fix_dir / pts_file).exists():
+                    final_pts = pts_file
+                else:
+                    final_pts = map_file  # Use map as fallback for pts
+                    if self.verbose > 0 and pts_file:
+                        print(f"Warning: Could not find pts file {pts_file} for {img_file.name}, using map file instead")
+                
+                all_image_files.append({
+                    'img': img_file.name,
+                    'map': map_file,
+                    'pts': final_pts,
+                })
+            elif self.verbose > 0:
+                # List available files in fix_dir for debugging
+                available_files = list(self.fix_dir.glob("*"))
+                print(f"Warning: Could not find map file for {img_file.name}, skipping")
+                print(f"  Image stem: {img_file.stem}")
+                print(f"  Available files in {self.fix_dir}: {[f.name for f in available_files[:5]]}...")
+        
+        # Load or create size dict
+        size_dict_file = config_path / "final_test_mit53_img_size_dict.json"
+        if size_dict_file.exists():
+            with open(size_dict_file, 'r') as f:
+                size_dict = json.load(f)
+                size_dict = {int(img_idx): val for
+                                  img_idx, val in size_dict.items()}
+        else:
+            size_dict = {}
+            for img_idx in range(min(len(all_image_files), self.n_train_val_images)):
+                img = cv2.imread(str(self.img_dir / all_image_files[img_idx]['img']))
+                if img is not None:
+                    size_dict[img_idx] = {'img_size': img.shape[:2]}
+            with open(size_dict_file, 'w') as f:
+                json.dump(size_dict, f)
+        
+        # Calculate out_size and target_size for each image
+        for img_idx in range(min(len(all_image_files), self.n_train_val_images)):
+            if img_idx not in size_dict:
+                continue
+            img_size = size_dict[img_idx]['img_size']
+            # Always use eval size calculation for FINAL_TEST_MIT53
+            out_size = self.get_out_size_eval(img_size)
+            target_size = img_size  # Use original image size for eval
+            
+            size_dict[img_idx].update({
+                'out_size': out_size, 'target_size': target_size})
+        
+        return all_image_files, size_dict
 
 
 class DHF1KDataset(Dataset, utils.KwConfigClass):

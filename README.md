@@ -154,10 +154,80 @@ Alternatively, the training path can be overwritten with the environment variabl
 
 ### Finetuning
 
-To finetune the model with the MIT1003 dataset for the MIT300 benchmark
+To finetune the model with the MIT1003 dataset for the MIT300 benchmark:
+
 ```bash
 python run.py train_finetune_mit
 ```
+
+#### Fine-tuning Process
+
+The fine-tuning process includes:
+
+1. **Training Phase**: Trains on MIT1003 training split (default: 10-fold cross-validation, uses fold 0 by default)
+2. **Validation Phase**: Validates on MIT1003 validation split (10% of data for fold 0)
+3. **Model Selection**: Saves the best model based on validation loss (KLD metric)
+4. **Evaluation Phase**: After fine-tuning, automatically evaluates on specified datasets (default: MIT300)
+
+#### Cross-Validation Split
+
+MIT1003 uses 10-fold cross-validation:
+- `x_val_step=0` (default): Uses fold 0 (images 0-100 for validation, 101-1002 for training)
+- `x_val_step=1-9`: Uses other folds
+- Training set: ~903 images (90% of 1003)
+- Validation set: ~100 images (10% of 1003)
+
+#### Usage Examples
+
+```bash
+# Basic fine-tuning (uses pretrained_unisal weights)
+python run.py train_finetune_mit
+
+# Fine-tune with custom parameters
+python run.py train_finetune_mit \
+  --lr=0.005 \
+  --num_epochs=10 \
+  --lr_gamma=0.9 \
+  --x_val_step=0
+
+# Fine-tune using your trained model as starting point
+python run.py train_finetune_mit \
+  --pretrained_train_id="your_train_id" \
+  --eval_sources=('MIT300', 'FINAL_TEST_MIT1003')
+```
+
+#### Results and Outputs
+
+After fine-tuning, you'll get:
+
+1. **Fine-tuned weights**: `train_dir/ft_mit1003.pth` (best model based on validation loss)
+2. **Training logs**: Saved in `train_dir/MIT1003_lr{lr}_lrGamma{gamma}_nEpochs{epochs}_TrainCNNAfter{epoch}_xVal{fold}/`
+   - `all_scalars.json`: Training and validation losses per epoch
+   - Tensorboard logs (if enabled)
+3. **Evaluation scores**: After fine-tuning completes, automatically scores on `eval_sources`
+   - Default: `MIT300_eval_scores.json`, `MIT300_eval_mean_scores.json`
+   - Custom: Scores for any datasets specified in `eval_sources`
+
+#### Fine-tuning Parameters
+
+- `lr`: Learning rate (default: 0.01)
+- `num_epochs`: Number of epochs (default: 8)
+- `lr_gamma`: Learning rate decay factor (default: 0.8)
+- `x_val_step`: Cross-validation fold (0-9, default: 0)
+- `train_cnn_after`: Epochs before training CNN (default: 0)
+- `pretrained_train_id`: Which model to start from (default: pretrained_unisal)
+
+#### Validation and Evaluation
+
+**During Training:**
+- Each epoch runs both **train** and **valid** phases
+- Validation loss (KLD) is computed on the validation split
+- Best model (lowest validation loss) is saved as `ft_mit1003.pth`
+
+**After Training:**
+- Automatic evaluation on `eval_sources` (default: MIT300)
+- Generates prediction files and computes metrics
+- Saves evaluation scores in JSON format
 
 
 ### Scoring

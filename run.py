@@ -10,7 +10,7 @@ WandB Integration:
 Examples:
     # Regular training with WandB
     python run.py train --use_wandb=True --wandb_project="unisal_experiment"
-    
+
     # Fine-tuning with WandB
     python run.py train_finetune_mit --use_wandb=True --wandb_project="unisal_finetune"
 """
@@ -32,7 +32,7 @@ import torch
 import unisal
 
 
-def train(eval_sources=('SALICON', 'UCFSports', 'DHF1K'),
+def train(eval_sources=('DHF1K', 'SALICON', 'UCFSports', 'Hollywood'),
           **kwargs):
     """Run training and evaluation."""
     trainer = unisal.train.Trainer(**kwargs)
@@ -42,28 +42,15 @@ def train(eval_sources=('SALICON', 'UCFSports', 'DHF1K'),
         trainer.export_scalars()
         trainer.writer.close()
 
-def train_finetune_mit(eval_sources=('MIT300',),
-          train_id=None, pretrained_train_id=None, **kwargs):
-    """Run fine-tuning on MIT1003 and evaluation.
+def train_finetune_mit(eval_sources=('FINAL_TEST_MIT53',),
+          pretrained_train_id=None,
+          **kwargs):
+    """Run training and evaluation.
     
     Args:
-        eval_sources: Sources to evaluate after fine-tuning
-        train_id: Train ID for the fine-tuning run (creates new training directory)
-        pretrained_train_id: Train ID to load pretrained weights from. 
-                           If None, uses current train_dir or pretrained_unisal as fallback.
-        **kwargs: Additional arguments passed to Trainer
+        pretrained_train_id: Train ID to load weights from for fine-tuning. 
+                            If None, uses 'pretrained_unisal'
     """
-    # If train_id is specified, use it as the prefix
-    if train_id is not None:
-        # Extract prefix and suffix from train_id
-        # train_id format is usually "prefix_suffix" or "timestamp_suffix"
-        parts = train_id.split('_', 1)
-        if len(parts) == 2:
-            kwargs['prefix'] = parts[0]
-            kwargs['suffix'] = parts[1]
-        else:
-            kwargs['suffix'] = train_id
-    
     trainer = unisal.train.Trainer(**kwargs)
     trainer.fine_tune_mit(pretrained_train_id=pretrained_train_id)
     for source in eval_sources:
@@ -83,11 +70,20 @@ def load_trainer(train_id=None):
 
 def score_model(
         train_id=None,
-        sources=('DHF1K', 'SALICON', 'UCFSports', 'Hollywood', 'FINAL_TEST_MIT300'),
+        sources=('DHF1K', 'SALICON', 'UCFSports', 'Hollywood'),
+        fine_tuned=False,
         **kwargs):
-    """Compute the scores for a trained model."""
+    """Compute the scores for a trained model.
+    
+    Args:
+        fine_tuned: If True, load fine-tuned weights (ft_mit1003) instead of best weights
+    """
 
     trainer = load_trainer(train_id)
+    
+    # Pass fine_tuned parameter to score_model
+    kwargs['fine_tuned'] = fine_tuned
+    
     for source in sources:
         trainer.score_model(source=source, **kwargs)
 
@@ -95,20 +91,41 @@ def score_model(
 def generate_predictions(
         train_id=None,
         sources=('DHF1K', 'SALICON', 'UCFSports', 'Hollywood',
-                 'MIT1003', 'MIT300'),
+                 'MIT1003', 'MIT300', 'FINAL_TEST_MIT53'),
+        fine_tuned=False,
+        phase=None,
         **kwargs):
-    """Generate predictions with a trained model."""
+    """Generate predictions with a trained model.
+    
+    Args:
+        train_id: Training run ID to load model from
+        sources: List of data sources to generate predictions for
+        fine_tuned: If True, load fine-tuned weights (ft_mit1003) instead of best weights
+        phase: Dataset phase ('eval', 'test', etc.). If None, auto-detects based on source
+    """
 
     trainer = load_trainer(train_id)
+    
+    # Pass fine_tuned parameter to generate_predictions
+    kwargs['fine_tuned'] = fine_tuned
+    
     for source in sources:
-
-        # Load fine-tuned weights for MIT datasets
-        if source in ('MIT1003', 'MIT300'):
-            trainer.model.load_weights(trainer.train_dir, "ft_mit1003")
+        # Set model_domain for MIT datasets
+        if source in ('MIT1003', 'MIT300', 'FINAL_TEST_MIT53'):
             trainer.salicon_cfg['x_val_step'] = 0
-            kwargs.update({'model_domain': 'SALICON', 'load_weights': False})
-
-        trainer.generate_predictions(source=source, **kwargs)
+            kwargs.update({'model_domain': 'SALICON'})
+        
+        # Set phase for FINAL_TEST_MIT53 (has ground truth, so use 'eval')
+        source_phase = phase
+        if source_phase is None:
+            if source == 'FINAL_TEST_MIT53':
+                source_phase = 'eval'
+            elif source == 'MIT300':
+                source_phase = 'test'  # MIT300 has no ground truth
+            else:
+                source_phase = 'eval'
+        
+        trainer.generate_predictions(source=source, phase=source_phase, **kwargs)
 
 
 def predictions_from_folder(
@@ -158,10 +175,27 @@ def visualize_examples(
     colormap=cv2.COLORMAP_JET,
     model_domain=None,
     show_labels=True,
+    fine_tuned=False,
+    official_train_id=None,
 ):
     """
     Visualize (original image + image with GT fixation overlay + prediction with GT overlay).
     Works for both image and video examples.
+    
+    Args:
+        folder_path: Path to folder containing images and ground truth maps
+        train_id: Training run ID to load model from
+        n: Number of random examples to visualize (default: 12)
+        seed: Random seed for selecting examples (default: 0)
+        out_dirname: Output directory name (default: "viz_out")
+        alpha: Transparency for heatmap overlay (default: 0.55)
+        colormap: OpenCV colormap to use (default: cv2.COLORMAP_JET)
+        model_domain: Model domain to use (default: auto-detect)
+        show_labels: Whether to show labels on visualization (default: True)
+        fine_tuned: If True, load fine-tuned weights (ft_mit1003) instead of best weights (default: False)
+        official_train_id: Train ID of official/pretrained model to compare with. 
+                          If None and fine_tuned=True, uses 'pretrained_unisal'. 
+                          If None and fine_tuned=False, uses 'pretrained_unisal' if it exists.
 
     Expected structure for images:
       folder_path/
@@ -184,18 +218,6 @@ def visualize_examples(
     Saves:
       folder_path/viz_out/{original_image_name}_viz.jpg, ...
 
-    Run:
-      # For FINAL_TEST_MIT53 (select 12 random images from 53 available):
-      python run.py visualize_examples \
-        --folder_path="examples/FINAL_TEST_MIT53" \
-        --train_id="2026-01-09_02:04:45_unisal_debug" \
-        --n=12
-      
-      # For SALICON (select 5 random images):
-      python run.py visualize_examples \
-        --folder_path="examples/salicon_test" \
-        --train_id="2026-01-09_02:04:45_unisal_debug" \
-        --n=5
     """
     folder_path = Path(folder_path).resolve()
     out_dir = folder_path / out_dirname
@@ -377,21 +399,34 @@ def visualize_examples(
         trainer.prefix = "unknown"
 
     # Load weights from the REAL folder
-    # Prefer weights_best.pth if it exists, else load latest checkpoint.
-    weights_best = real_train_dir / "weights_best.pth"
-    if weights_best.exists():
-        trainer.model.load_best_weights(real_train_dir)
-        print("Loaded weights_best.pth")
+    # If fine_tuned=True, MUST use weights_ft_mit1003.pth, else use weights_best.pth
+    if fine_tuned:
+        weights_ft = real_train_dir / "weights_ft_mit1003.pth"
+        if weights_ft.exists():
+            trainer.model.load_weights(real_train_dir, "ft_mit1003")
+            print("✓ Loaded fine-tuned weights (weights_ft_mit1003.pth)")
+        else:
+            raise FileNotFoundError(
+                f"Fine-tuned weights not found at {weights_ft}. "
+                f"When fine_tuned=True, weights_ft_mit1003.pth must exist. "
+                f"Please ensure you have fine-tuned the model first."
+            )
     else:
-        # load latest chkpnt_epoch*.pth manually
-        chkpnts = sorted(real_train_dir.glob("chkpnt_epoch*.pth"))
-        if not chkpnts:
-            raise FileNotFoundError(f"No checkpoints found in {real_train_dir}")
-        last = chkpnts[-1]
-        print(f"Loading checkpoint: {last.name}")
-        chkpnt = torch.load(last, map_location=trainer.device)
-        trainer.model.load_state_dict(chkpnt["model_state_dict"], strict=True)
-        print("Loaded checkpoint model_state_dict")
+        # Prefer weights_best.pth if it exists, else load latest checkpoint.
+        weights_best = real_train_dir / "weights_best.pth"
+        if weights_best.exists():
+            trainer.model.load_best_weights(real_train_dir)
+            print("Loaded weights_best.pth")
+        else:
+            # load latest chkpnt_epoch*.pth manually
+            chkpnts = sorted(real_train_dir.glob("chkpnt_epoch*.pth"))
+            if not chkpnts:
+                raise FileNotFoundError(f"No checkpoints found in {real_train_dir}")
+            last = chkpnts[-1]
+            print(f"Loading checkpoint: {last.name}")
+            chkpnt = torch.load(last, map_location=trainer.device)
+            trainer.model.load_state_dict(chkpnt["model_state_dict"], strict=True)
+            print("Loaded checkpoint model_state_dict")
 
     # -------- run prediction on selected images (without touching train_dir) --------
     tmp_infer = out_dir / "_tmp_infer"
@@ -442,27 +477,69 @@ def visualize_examples(
     if not pred_dir.exists():
         raise RuntimeError(f"Prediction folder not created: {pred_dir}")
 
-    # -------- Load pretrained UNISAL model and generate predictions --------
+    # -------- Load official/pretrained UNISAL model for comparison --------
     pretrained_pred_dir = None
-    pretrained_train_dir = train_root / "pretrained_unisal"
-    if pretrained_train_dir.exists() and train_id != "pretrained_unisal":
-        print(f"\nLoading pretrained UNISAL model from {pretrained_train_dir}")
+    
+    # Determine which official model to use for comparison
+    if official_train_id is None:
+        # Default to pretrained_unisal if not specified
+        official_train_id = "pretrained_unisal"
+    
+    pretrained_train_dir = train_root / official_train_id
+    
+    # Only load comparison model if it's different from the current model
+    # and if fine_tuned=True (to compare fine-tuned vs official)
+    # or if it exists and we want to compare anyway
+    should_load_comparison = (
+        pretrained_train_dir.exists() and 
+        train_id != official_train_id
+    )
+    
+    if should_load_comparison:
+        print(f"\nLoading official/pretrained UNISAL model from {official_train_id}")
         try:
             pretrained_trainer = unisal.train.Trainer.init_from_cfg_dir(pretrained_train_dir)
-            # Load pretrained weights
-            pretrained_weights = pretrained_train_dir / "weights_best.pth"
-            if pretrained_weights.exists():
-                pretrained_trainer.model.load_best_weights(pretrained_train_dir)
-                print("Loaded pretrained UNISAL weights_best.pth")
-            else:
-                chkpnts = sorted(pretrained_train_dir.glob("chkpnt_epoch*.pth"))
-                if chkpnts:
-                    last = chkpnts[-1]
-                    chkpnt = torch.load(last, map_location=pretrained_trainer.device)
-                    pretrained_trainer.model.load_state_dict(chkpnt["model_state_dict"], strict=True)
-                    print(f"Loaded pretrained checkpoint: {last.name}")
             
-            # Generate predictions with pretrained model
+            # IMPORTANT: force prefix/suffix so trainer.train_dir == pretrained_train_dir
+            parts = official_train_id.split("_")
+            if len(parts) >= 3:
+                pretrained_trainer.prefix = "_".join(parts[:2])
+                pretrained_trainer.suffix = "_".join(parts[2:])
+            else:
+                pretrained_trainer.suffix = official_train_id
+                pretrained_trainer.prefix = "unknown"
+            
+            # Load official/pretrained weights
+            # If fine_tuned=True, MUST use fine-tuned weights from official model, else use best weights
+            if fine_tuned:
+                # Load fine-tuned weights from official model (required when fine_tuned=True)
+                pretrained_weights_ft = pretrained_train_dir / "weights_ft_mit1003.pth"
+                if pretrained_weights_ft.exists():
+                    pretrained_trainer.model.load_weights(pretrained_train_dir, "ft_mit1003")
+                    print(f"✓ Loaded official model fine-tuned weights (weights_ft_mit1003.pth) from {official_train_id}")
+                else:
+                    raise FileNotFoundError(
+                        f"Fine-tuned weights not found in official model at {pretrained_weights_ft}. "
+                        f"When fine_tuned=True, both your model and the comparison model must have fine-tuned weights. "
+                        f"Please ensure {official_train_id} has been fine-tuned."
+                    )
+            else:
+                # Use best weights for comparison when fine_tuned=False
+                pretrained_weights = pretrained_train_dir / "weights_best.pth"
+                if pretrained_weights.exists():
+                    pretrained_trainer.model.load_best_weights(pretrained_train_dir)
+                    print(f"Loaded official model weights_best.pth from {official_train_id}")
+                else:
+                    chkpnts = sorted(pretrained_train_dir.glob("chkpnt_epoch*.pth"))
+                    if chkpnts:
+                        last = chkpnts[-1]
+                        chkpnt = torch.load(last, map_location=pretrained_trainer.device)
+                        pretrained_trainer.model.load_state_dict(chkpnt["model_state_dict"], strict=True)
+                        print(f"Loaded official model checkpoint: {last.name} from {official_train_id}")
+                    else:
+                        raise FileNotFoundError(f"No weights found in {pretrained_train_dir}")
+            
+            # Generate predictions with official/pretrained model
             pretrained_tmp_infer = out_dir / "_tmp_infer_pretrained"
             pretrained_images = pretrained_tmp_infer / "images"
             if pretrained_tmp_infer.exists():
@@ -484,12 +561,14 @@ def visualize_examples(
             )
             pretrained_pred_dir = pretrained_tmp_infer / "saliency"
             if pretrained_pred_dir.exists():
-                print("Generated pretrained UNISAL predictions")
+                pred_files = list(pretrained_pred_dir.glob("*"))
+                print(f"Generated official model predictions from {official_train_id}")
+                print(f"  Found {len(pred_files)} prediction files in {pretrained_pred_dir}")
             else:
-                print("Warning: Pretrained predictions not generated")
+                print(f"Warning: Official model predictions directory not found: {pretrained_pred_dir}")
                 pretrained_pred_dir = None
         except Exception as e:
-            print(f"Warning: Could not load pretrained UNISAL model: {e}")
+            print(f"Warning: Could not load official/pretrained UNISAL model: {e}")
             pretrained_pred_dir = None
 
     # -------- create visualizations --------
@@ -528,16 +607,34 @@ def visualize_examples(
         if pretrained_pred_dir and pretrained_pred_dir.exists():
             pretrained_pred_path = pretrained_pred_dir / im_path.name
             if not pretrained_pred_path.exists():
+                # Try alternative extensions
                 for ext in [".png", ".jpg", ".jpeg"]:
                     alt = pretrained_pred_dir / (im_path.stem + ext)
                     if alt.exists():
                         pretrained_pred_path = alt
                         break
+                # If still not found, try to find any file with similar name
+                if not pretrained_pred_path.exists():
+                    # List all files in the directory for debugging
+                    all_files = list(pretrained_pred_dir.glob("*"))
+                    print(f"  Debug: Looking for prediction for {im_path.name}")
+                    print(f"  Debug: Available files in {pretrained_pred_dir}: {[f.name for f in all_files[:5]]}")
             
             if pretrained_pred_path.exists():
                 pretrained_pred_gray = cv2.imread(str(pretrained_pred_path), cv2.IMREAD_GRAYSCALE)
                 if pretrained_pred_gray is not None:
                     pretrained_pred_gray = normalize_0_255(pretrained_pred_gray)
+                    if idx == 1:  # Only print for first image to avoid spam
+                        print(f"  ✓ Loaded official model prediction: {pretrained_pred_path.name}")
+                else:
+                    if idx == 1:
+                        print(f"  ✗ Warning: Could not read official model prediction: {pretrained_pred_path}")
+            else:
+                if idx == 1:  # Only print for first image
+                    print(f"  ✗ Warning: Official model prediction not found: {pretrained_pred_path}")
+                    # List available files for debugging
+                    all_files = list(pretrained_pred_dir.glob("*"))
+                    print(f"    Available files: {[f.name for f in all_files[:10]]}")
         
         # Create panels:
         # 1. Original image
@@ -556,7 +653,7 @@ def visualize_examples(
         else:
             panel3 = pred_overlay  # Just prediction if no GT
 
-        # 4. Pretrained UNISAL prediction with GT overlay (if available)
+        # 4. Official/pretrained model prediction with GT overlay (if available)
         if pretrained_pred_gray is not None:
             pretrained_pred_overlay = overlay_heatmap(img, pretrained_pred_gray, alpha=alpha, colormap=colormap)
             if gt_map is not None:
@@ -564,9 +661,13 @@ def visualize_examples(
             else:
                 panel4 = pretrained_pred_overlay
             n_panels = 4
+            if idx == 1:  # Only print for first image
+                print(f"  ✓ Including official model comparison panel (4 panels total)")
         else:
             panel4 = None
             n_panels = 3
+            if idx == 1 and pretrained_pred_dir and pretrained_pred_dir.exists():
+                print(f"  ✗ Official model prediction not loaded (showing 3 panels instead of 4)")
 
         h, w = img.shape[:2]
         pad = 12

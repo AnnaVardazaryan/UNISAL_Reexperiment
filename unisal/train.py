@@ -160,6 +160,7 @@ class Trainer(utils.KwConfigClass):
         self.hollywood_cfg = hollywood_cfg or {}
         self.ucfsports_cfg = ucfsports_cfg or {}
         self.final_test_mit1003_cfg = final_test_mit1003_cfg or {}
+        self.final_test_mit300_cfg = final_test_mit300_cfg or {}
         self.shuffle_datasets = shuffle_datasets
         self.cnn_lr_factor = cnn_lr_factor
         self.train_cnn_after = train_cnn_after
@@ -338,7 +339,7 @@ class Trainer(utils.KwConfigClass):
                 sample,
                 grad_clip=self.grad_clip,
                 target_size=target_size,
-                source="SALICON" if src == "MIT1003" else src,
+                source="SALICON" if src in ("MIT1003", "MIT950", "FINAL_TEST_MIT53") else src,
             )
 
             # Book keeping
@@ -511,11 +512,11 @@ class Trainer(utils.KwConfigClass):
 
         # Select static or dynamic forward pass for Bypass-RNN
         model_kwargs.update(
-            {"static": model_kwargs["source"] in ("SALICON", "MIT300", "MIT1003", "FINAL_TEST_MIT300")}
+            {"static": model_kwargs["source"] in ("SALICON", "MIT300", "MIT1003", "MIT950", "FINAL_TEST_MIT53")}
         )
 
         # Set additional parameters
-        static_data = source in ("SALICON", "MIT300", "MIT1003", "FINAL_TEST_MIT300")
+        static_data = source in ("SALICON", "MIT300", "MIT1003", "MIT950", "FINAL_TEST_MIT53")
         if static_data:
             smooth_method = None
             auc_portion = 1.0
@@ -626,8 +627,8 @@ class Trainer(utils.KwConfigClass):
                 this_pred_dir /= f"{vid_nr:04d}"
             elif source == "MIT1003":
                 this_pred_dir /= self.mit1003_dir.stem
-            elif source == "FINAL_TEST_MIT300":
-                this_pred_dir /= "FINAL_TEST_MIT300"
+            elif source == "FINAL_TEST_MIT53":
+                this_pred_dir /= "FINAL_TEST_MIT53"
             elif source == "MIT300" and "x_val_step" in self.salicon_cfg:
                 this_pred_dir /= f"MIT300_xVal{self.salicon_cfg['x_val_step']}"
             elif source in ("Hollywood", "UCFSports"):
@@ -644,7 +645,7 @@ class Trainer(utils.KwConfigClass):
                     filename = dataset.samples[vid_nr][0]
                 elif source == "MIT1003":
                     filename = dataset.all_image_files[vid_nr]["img"]
-                elif source == "FINAL_TEST_MIT300":
+                elif source == "FINAL_TEST_MIT53":
                     filename = dataset.samples[vid_nr]["img"]
                 elif source in ("Hollywood", "UCFSports"):
                     filename = dataset.get_data_file(
@@ -785,6 +786,7 @@ class Trainer(utils.KwConfigClass):
         model_domain=None,
         phase=None,
         load_weights=True,
+        fine_tuned=False,
         vid_nr_array=None,
     ):
         """
@@ -794,15 +796,18 @@ class Trainer(utils.KwConfigClass):
         ground truth is available.
         For all other datasets, the test set is held out and therefore
         validation set scores are computed.
+        
+        Args:
+            fine_tuned: If True, load fine-tuned weights (ft_mit1003) instead of best weights
         """
 
         if load_weights:
-            # Load weights based on training mode
-            if hasattr(self, 'mit1003_finetuned') and self.mit1003_finetuned:
+            # Load weights based on fine_tuned parameter or training mode
+            if fine_tuned or (hasattr(self, 'mit1003_finetuned') and self.mit1003_finetuned):
                 # Load fine-tuned MIT1003 weights if available
                 try:
                     self.model.load_weights(self.train_dir, "ft_mit1003")
-                    print("MIT1003 fine-tuned weights loaded")
+                    print("Fine-tuned weights (ft_mit1003) loaded")
                 except FileNotFoundError:
                     print("No fine-tuned weights found, loading best weights")
                     try:
@@ -824,8 +829,12 @@ class Trainer(utils.KwConfigClass):
 
         # Select the appropriate phase (see docstring) and get the dataset
         if phase is None:
-            phase = "eval" if source in ("DHF1K", "SALICON", "MIT1003") else "test"
+            phase = "eval" if source in ("DHF1K", "SALICON", "MIT1003", "FINAL_TEST_MIT53") else "test"
         dataset = self.get_dataset(phase, source)
+        
+        # Set model_domain for datasets that should use SALICON model
+        if model_domain is None and source in ("MIT1003", "MIT950", "FINAL_TEST_MIT53"):
+            model_domain = "SALICON"
         
         # MIT300 doesn't have ground truth labels, so disable metrics
         if source == "MIT300":
@@ -1001,21 +1010,42 @@ class Trainer(utils.KwConfigClass):
         source="DHF1K",
         phase="eval",
         load_weights=True,
+        fine_tuned=False,
         vid_nr_array=None,
         **kwargs,
     ):
-        """Generate predictions for submission and visualization"""
+        """Generate predictions for submission and visualization
+        
+        Args:
+            fine_tuned: If True, load fine-tuned weights (ft_mit1003) instead of best weights
+        """
 
         if load_weights:
-            # Load the best weights, if available, otherwise the weights of
-            # the last epoch
-            try:
-                self.model.load_best_weights(self.train_dir)
-                print("Best weights loaded")
-            except FileNotFoundError:
-                print("No best weights found")
-                self.model.load_last_chkpnt(self.train_dir)
-                print("Last checkpoint loaded")
+            # Load weights based on fine_tuned parameter
+            if fine_tuned or (hasattr(self, 'mit1003_finetuned') and self.mit1003_finetuned):
+                # Load fine-tuned weights if available
+                try:
+                    self.model.load_weights(self.train_dir, "ft_mit1003")
+                    print("Fine-tuned weights (ft_mit1003) loaded")
+                except FileNotFoundError:
+                    print("No fine-tuned weights found, loading best weights")
+                    try:
+                        self.model.load_best_weights(self.train_dir)
+                        print("Best weights loaded")
+                    except FileNotFoundError:
+                        print("No best weights found")
+                        self.model.load_last_chkpnt(self.train_dir)
+                        print("Last checkpoint loaded")
+            else:
+                # Load the best weights, if available, otherwise the weights of
+                # the last epoch
+                try:
+                    self.model.load_best_weights(self.train_dir)
+                    print("Best weights loaded")
+                except FileNotFoundError:
+                    print("No best weights found")
+                    self.model.load_last_chkpnt(self.train_dir)
+                    print("Last checkpoint loaded")
 
         # Get the dataset
         dataset = self.get_dataset(phase, source)
@@ -1024,7 +1054,7 @@ class Trainer(utils.KwConfigClass):
             # Get list of sample numbers
             if source == "MIT300":
                 vid_nr_array = list(range(300))
-            elif source == "FINAL_TEST_MIT300":
+            elif source == "FINAL_TEST_MIT53":
                 vid_nr_array = list(range(len(dataset.samples)))
             else:
                 vid_nr_array = list(dataset.n_images_dict.keys())
@@ -1135,20 +1165,13 @@ class Trainer(utils.KwConfigClass):
                     cv2.imwrite(str(pred_file), smap, [cv2.IMWRITE_JPEG_QUALITY, 100])
 
     def fine_tune_mit(
-        self, lr=0.01, num_epochs=8, lr_gamma=0.8, x_val_step=0, train_cnn_after=0, 
-        pretrained_train_id=None
+            self, lr=0.01, num_epochs=8, lr_gamma=0.8, x_val_step=0, train_cnn_after=0,
+            pretrained_train_id=None
     ):
-        """Fine tune the model with the MIT1003 dataset for MIT300 submission
+        """Fine tune the model with the MIT950 dataset
         
         Args:
-            lr: Learning rate for fine-tuning
-            num_epochs: Number of fine-tuning epochs
-            lr_gamma: Learning rate decay factor
-            x_val_step: Cross-validation fold to use
-            train_cnn_after: Epochs before training CNN
-            pretrained_train_id: Train ID to load weights from. If None, tries:
-                1. Current train_dir (if weights exist)
-                2. pretrained_unisal (fallback)
+            pretrained_train_id: Train ID to load weights from. If None, uses 'pretrained_unisal'
         """
 
         # Set the fine tuning parameters
@@ -1164,7 +1187,7 @@ class Trainer(utils.KwConfigClass):
         self.loss_metrics = ("kld",)
         self.salicon_weight = 1.0
         self.salicon_batch_size = 32
-        self.data_sources = ("MIT1003",)
+        self.data_sources = ("MIT950",)
         self.shuffle_datasets = True
         self.cnn_lr_factor = 0.1
         self.train_cnn_after = train_cnn_after
@@ -1174,57 +1197,65 @@ class Trainer(utils.KwConfigClass):
 
         self.num_workers = 4
 
-        # Load the pretrained weights
-        if pretrained_train_id is not None:
-            # Use specified train_id
-            pretrained_dir = Path(os.environ["TRAIN_DIR"]) / pretrained_train_id
-            print(f"Loading weights from specified train_id: {pretrained_train_id}")
-            try:
-                self.model.load_best_weights(pretrained_dir)
-                print(f"Best weights loaded from {pretrained_dir}")
-            except FileNotFoundError:
-                try:
-                    self.model.load_last_chkpnt(pretrained_dir)
-                    print(f"Last checkpoint loaded from {pretrained_dir}")
-                except (FileNotFoundError, IndexError):
-                    print(f"Warning: No weights found in {pretrained_dir}")
-                    print("Model will start from random initialization or current state")
-        else:
-            # Original logic: try pretrained_unisal first, then current train_dir
-            pretrained_dir = Path(os.environ["TRAIN_DIR"]) / "pretrained_unisal"
-            pretrained_weights = pretrained_dir / "weights_best.pth"
-            current_weights = self.train_dir / "weights_best.pth"
-            
-            if pretrained_weights.exists() and not current_weights.exists():
-                import shutil
-                shutil.copy2(pretrained_weights, current_weights)
-                print(f"Copied pretrained weights from {pretrained_weights} to {current_weights}")
+        # Determine which train_id to use for loading pretrained weights
+        if pretrained_train_id is None:
+            pretrained_train_id = "pretrained_unisal"
+        
+        pretrained_dir = Path(os.environ["TRAIN_DIR"]) / pretrained_train_id
+        pretrained_weights = pretrained_dir / "weights_best.pth"
+        current_weights = self.train_dir / "weights_best.pth"
 
-            # Load the pretrained weights from pretrained_unisal directory
+        if pretrained_weights.exists() and not current_weights.exists():
+            import shutil
+            shutil.copy2(pretrained_weights, current_weights)
+            print(f"Copied pretrained weights from {pretrained_weights} to {current_weights}")
+
+        # Load the pretrained weights from the specified train_id directory
+        print(f"Loading pretrained weights from train_id: {pretrained_train_id}")
+        try:
+            # Load with strict=False to handle missing keys (e.g., Hollywood layers)
+            state_dict = torch.load(pretrained_dir / "weights_best.pth", map_location=self.device)
+            missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
+            if missing_keys:
+                print(f"Warning: Missing keys (will use random initialization): {len(missing_keys)} keys")
+                if len(missing_keys) <= 10:
+                    for key in missing_keys:
+                        print(f"  - {key}")
+                else:
+                    for key in missing_keys[:5]:
+                        print(f"  - {key}")
+                    print(f"  ... and {len(missing_keys) - 5} more")
+            if unexpected_keys:
+                print(f"Warning: Unexpected keys (ignored): {len(unexpected_keys)} keys")
+            print(f"Pretrained best weights loaded from {pretrained_train_id}")
+        except FileNotFoundError:
             try:
-                self.model.load_best_weights(pretrained_dir)
-                print("Pretrained best weights loaded")
+                # Try loading from last checkpoint
+                chkpnts = sorted(list(pretrained_dir.glob("chkpnt_epoch*.pth")))
+                if chkpnts:
+                    last_chkpnt = chkpnts[-1]
+                    chkpnt = torch.load(last_chkpnt, map_location=self.device)
+                    missing_keys, unexpected_keys = self.model.load_state_dict(chkpnt["model_state_dict"], strict=False)
+                    if missing_keys:
+                        print(f"Warning: Missing keys: {len(missing_keys)} keys")
+                    if unexpected_keys:
+                        print(f"Warning: Unexpected keys: {len(unexpected_keys)} keys")
+                    print(f"Pretrained last checkpoint loaded from {pretrained_train_id}")
+                else:
+                    raise FileNotFoundError("No checkpoints found")
             except FileNotFoundError:
+                print(f"No pretrained weights found in {pretrained_dir}, trying current train_dir")
                 try:
-                    self.model.load_last_chkpnt(pretrained_dir)
-                    print("Pretrained last checkpoint loaded")
-                except (FileNotFoundError, IndexError):
-                    print("No pretrained weights found, trying current train_dir")
-                    try:
-                        self.model.load_best_weights(self.train_dir)
-                        print("Best weights loaded from current train_dir")
-                    except FileNotFoundError:
-                        print("No best weights found")
-                        try:
-                            self.model.load_last_chkpnt(self.train_dir)
-                            print("Last checkpoint loaded from current train_dir")
-                        except (FileNotFoundError, IndexError):
-                            print("Warning: No weights found. Model will start from random initialization or current state")
+                    self.model.load_best_weights(self.train_dir)
+                    print("Best weights loaded from current train_dir")
+                except FileNotFoundError:
+                    print("No best weights found")
+                    self.model.load_last_chkpnt(self.train_dir)
 
         # Run the fine tuning
         # Initialize WandB logging for fine-tuning
         self.init_wandb()
-        
+
         # pprint.pprint(self.asdict(), width=1)
         best_epoch = None
         best_val = None
@@ -1236,7 +1267,13 @@ class Trainer(utils.KwConfigClass):
             for self.phase in self.phases:
                 self.fit_phase()
 
-            val_loss = self.all_scalars["mit1003"]["loss"]["valid"][self.epoch]
+            # Use mit950 key for scalars (fallback to mit1003 for backward compatibility)
+            scalar_key = "mit950" if "mit950" in self.all_scalars else "mit1003"
+            if scalar_key not in self.all_scalars or "loss" not in self.all_scalars[scalar_key]:
+                # Try to get from salicon if mit950/mit1003 not available
+                scalar_key = "salicon" if "salicon" in self.all_scalars else "mit1003"
+            
+            val_loss = self.all_scalars[scalar_key]["loss"]["valid"][self.epoch]
             if math.isnan(val_loss):
                 best_epoch = 0
                 best_val = 1000
@@ -1246,23 +1283,23 @@ class Trainer(utils.KwConfigClass):
             if self.best_val_score is None:
                 self.best_val_score = val_score
                 self.model.save_weights(self.train_dir, "ft_mit1003")
-                print(f"Initial MIT1003 fine-tuned weights saved at epoch {self.epoch}")
+                print(f"Initial MIT950 fine-tuned weights saved at epoch {self.epoch}")
                 best_epoch = self.epoch
                 best_val = val_loss
             elif val_score > self.best_val_score:
                 self.best_val_score = val_score
                 self.model.save_weights(self.train_dir, "ft_mit1003")
-                print(f"New best MIT1003 fine-tuned weights saved at epoch {self.epoch}")
+                print(f"New best MIT950 fine-tuned weights saved at epoch {self.epoch}")
                 best_epoch = self.epoch
                 best_val = val_loss
 
             self.epoch += 1
 
         self.export_scalars()
-        
+
         # Finish WandB logging
         self.finish_wandb()
-        
+
         return best_val, best_epoch
 
     def get_dataset(self, phase, source="DHF1K"):
@@ -1275,11 +1312,28 @@ class Trainer(utils.KwConfigClass):
                 dataset_cls = data.get_dataset()
                 config = self.data_cfg
             else:
-                dataset_cls_name = f"{source}Dataset"
-                dataset_cls = getattr(data, dataset_cls_name)
+                # Map source names to dataset class names (handle special cases)
+                source_to_class = {
+                    "MIT1003": "MIT1003Dataset",
+                    "MIT950": "MIT950Dataset",
+                    "FINAL_TEST_MIT53": "FINAL_TEST_MIT53Dataset",
+                    "MIT300": "MIT300Dataset",
+                    "SALICON": "SALICONDataset",
+                    "Hollywood": "HollywoodDataset",
+                    "UCFSports": "UCFSportsDataset",
+                }
+                dataset_cls_name = source_to_class.get(source, f"{source}Dataset")
+                try:
+                    dataset_cls = getattr(data, dataset_cls_name)
+                except AttributeError:
+                    raise AttributeError(
+                        f"Dataset class '{dataset_cls_name}' not found in unisal.data module. "
+                        f"Source was: '{source}' (type: {type(source)}). "
+                        f"Available dataset classes: {[name for name in dir(data) if 'Dataset' in name]}"
+                    )
                 if source in ("MIT300",):
                     config = {}
-                elif source in ("MIT1003",):
+                elif source in ("MIT1003", "MIT950", "FINAL_TEST_MIT53"):
                     config = getattr(self, f"salicon_cfg")
                 else:
                     config = getattr(self, f"{source.lower()}_cfg")
@@ -1301,17 +1355,15 @@ class Trainer(utils.KwConfigClass):
                 batch_size = self.batch_size
             elif source in ("Hollywood", "UCFSports"):
                 batch_size = self.__getattribute__(f"{source.lower()}_batch_size")
-            elif phase == "valid" and source == "MIT1003":
+            elif phase == "valid" and source in ("MIT1003", "MIT950"):
                 batch_size = 8
-            elif source in ("SALICON", "MIT1003"):
+            elif source in ("SALICON", "MIT1003", "MIT950", "FINAL_TEST_MIT53"):
                 batch_size = self.salicon_batch_size or len(dataset) // len(
                     self.get_dataloader(phase)
                 )
                 if batch_size > 8:
                     batch_size -= batch_size % 2
                 batch_size = min(32, batch_size)
-            elif source == "FINAL_TEST_MIT300":
-                batch_size = 8
             else:
                 raise ValueError(f"Unknown dataset source {source}")
             print(f"{source}, phase {phase} batch size: {batch_size}")
@@ -1564,7 +1616,7 @@ class Trainer(utils.KwConfigClass):
     def writer(self):
         """Return TensorboardX writer"""
         if self.tboard and self._writer is None:
-            if self.data_sources == ("MIT1003",):
+            if self.data_sources in (("MIT1003",), ("MIT950",)):
                 log_dir = self.mit1003_dir
                 log_dir.mkdir(exist_ok=True)
             else:
@@ -1574,24 +1626,25 @@ class Trainer(utils.KwConfigClass):
 
     @property
     def mit1003_dir(self):
-        """Return directory to fine tune on MIT1003"""
+        """Return directory to fine tune on MIT1003/MIT950"""
+        dataset_name = self.data_sources[0] if self.data_sources else "MIT1003"
         if self.mit1003_finetuned:
             mit1003_dir = (
-                self.train_dir / f"MIT1003_lr{self.lr:.4f}_"
+                self.train_dir / f"{dataset_name}_lr{self.lr:.4f}_"
                 f"lrGamma{self.lr_gamma:.2f}_nEpochs{self.num_epochs}_"
                 f"TrainCNNAfter{self.train_cnn_after}_"
                 f"xVal{self.salicon_cfg['x_val_step']}"
             )
         else:
             mit1003_dir = (
-                self.train_dir / f"MIT1003_" f"xVal{self.salicon_cfg['x_val_step']}"
+                self.train_dir / f"{dataset_name}_" f"xVal{self.salicon_cfg['x_val_step']}"
             )
         mit1003_dir.mkdir(exist_ok=True)
         return mit1003_dir
 
     def export_scalars(self, suffix=""):
         """Save self.all_scalars"""
-        if self.data_sources == ("MIT1003",):
+        if self.data_sources in (("MIT1003",), ("MIT950",)):
             export_dir = self.mit1003_dir
         else:
             export_dir = self.train_dir
